@@ -250,7 +250,7 @@
     border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
   }
 
-  .qr-canvas-wrap canvas { display: block; image-rendering: pixelated; width: 256px; height: 256px; }
+  .qr-canvas-wrap canvas { display: block; image-rendering: pixelated; width: 256px; height: auto; }
 
   .qr-caption { font-size: 11px; color: var(--text-muted); margin-top: 12px; font-family: var(--mono); }
 
@@ -311,6 +311,37 @@
   .confirm-cancel:hover { background: var(--surface-3); color: var(--text); }
   .confirm-yes { background: var(--danger); color: #fff; border-color: var(--danger); }
   .confirm-yes:hover { opacity: 0.85; }
+
+  /* Label modal (QR export) */
+  .label-modal {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+    z-index: 920; align-items: center; justify-content: center; padding: 20px;
+  }
+  .label-modal.visible { display: flex; }
+  .label-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 28px; max-width: 380px; width: 100%;
+  }
+  .label-title { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 8px; text-align: center; }
+  .label-desc { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; text-align: center; line-height: 1.5; }
+  .label-input {
+    width: 100%; padding: 14px 16px; background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+    font-family: var(--sans); font-size: 14px; outline: none; margin-bottom: 18px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .label-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .label-input::placeholder { color: var(--text-muted); }
+  .label-actions { display: flex; gap: 10px; }
+  .label-btn {
+    flex: 1; padding: 12px; border-radius: 8px; font-family: var(--sans);
+    font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); transition: all 0.2s;
+  }
+  .label-cancel { background: var(--surface-2); color: var(--text-dim); }
+  .label-cancel:hover { background: var(--surface-3); color: var(--text); }
+  .label-confirm { background: linear-gradient(135deg, var(--accent), #2563eb); color: #fff; border-color: var(--accent); }
+  .label-confirm:hover { opacity: 0.9; }
 
   .toast {
     position: fixed; bottom: 24px; left: 50%;
@@ -500,6 +531,19 @@
     <div class="confirm-actions">
       <button class="confirm-btn confirm-cancel" onclick="hideConfirm()">Cancelar</button>
       <button class="confirm-btn confirm-yes" onclick="confirmClear()">Sim, limpar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Label modal (QR export) -->
+<div class="label-modal" id="labelModal" onclick="if(event.target===this)hideLabelModal()">
+  <div class="label-box">
+    <div class="label-title">&#x1F4F1; Exportar QR Code</div>
+    <div class="label-desc">Adicione uma etiqueta (opcional) que aparecerá acima do QR. Ela é só visual — não faz parte do dado criptografado.</div>
+    <input type="text" class="label-input" id="qrLabelInput" placeholder="Ex: Recado, Backup de notas, Mensagem..." maxlength="60" autocomplete="off">
+    <div class="label-actions">
+      <button class="label-btn label-cancel" onclick="hideLabelModal()">Cancelar</button>
+      <button class="label-btn label-confirm" onclick="confirmExportQR()">Gerar QR</button>
     </div>
   </div>
 </div>
@@ -1535,6 +1579,9 @@ var qrcodegen;
   }
 
   // ─── QR generation ───────────────────────────
+  const QR_FONT = "600 {SIZE}px system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif";
+
+  // Step 1: validate, then open the label modal
   function exportQR() {
     const text = document.getElementById('resultOutput').value;
     if (!text) return;
@@ -1542,9 +1589,24 @@ var qrcodegen;
       showToast('\u26A0\uFE0F Texto longo demais para QR (' + text.length + '/' + MAX_QR_LENGTH + '). Use "Salvar .txt".', true);
       return;
     }
+    const input = document.getElementById('qrLabelInput');
+    document.getElementById('labelModal').classList.add('visible');
+    setTimeout(function(){ input.focus(); }, 50);
+  }
+
+  function hideLabelModal() {
+    document.getElementById('labelModal').classList.remove('visible');
+  }
+
+  // Step 2: read the label and actually generate the QR
+  function confirmExportQR() {
+    const text = document.getElementById('resultOutput').value;
+    if (!text) return;
+    const label = document.getElementById('qrLabelInput').value.trim();
+    hideLabelModal();
     try {
       const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.QUARTILE);
-      renderQR(qr);
+      renderQR(qr, label);
       document.getElementById('qrDisplay').classList.add('visible');
       document.getElementById('qrCaption').textContent = 'Versão ' + ((qr.size - 17) / 4) + ' \u2022 Nível Q \u2022 ' + text.length + ' caracteres';
       showToast('\u{1F4F1} QR gerado!');
@@ -1553,24 +1615,77 @@ var qrcodegen;
     }
   }
 
-  function renderQR(qr) {
-    const border = 4; // quiet zone modules
-    const scale = 8;  // px per module (rendered then displayed at fixed CSS size)
-    const dim = (qr.size + border * 2) * scale;
+  function wrapText(ctx, text, maxWidth) {
+    const words = text.split(/\s+/);
+    const lines = [];
+    let cur = '';
+    for (let i = 0; i < words.length; i++) {
+      const test = cur ? cur + ' ' + words[i] : words[i];
+      if (ctx.measureText(test).width > maxWidth && cur) {
+        lines.push(cur);
+        cur = words[i];
+      } else {
+        cur = test;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+
+  // The label is purely a visual caption drawn into the image — it is NOT
+  // part of the QR data and NOT encrypted. The QR still encodes only the
+  // CV1: ciphertext.
+  function renderQR(qr, label) {
+    const border = 4;            // quiet zone modules
+    const scale = 8;             // px per module
+    const qrDim = (qr.size + border * 2) * scale;
     const canvas = document.getElementById('qrCanvas');
-    canvas.width = dim;
-    canvas.height = dim;
     const ctx = canvas.getContext('2d');
+
+    label = (label || '').trim();
+    let lines = [], fontSize = 0, lineHeight = 0, padTop = 0, padBottom = 0, labelHeight = 0;
+
+    if (label) {
+      fontSize = Math.max(22, Math.round(qrDim * 0.05));
+      lineHeight = Math.round(fontSize * 1.3);
+      padTop = Math.round(fontSize * 0.9);
+      padBottom = Math.round(fontSize * 0.5);
+      ctx.font = QR_FONT.replace('{SIZE}', fontSize);
+      lines = wrapText(ctx, label, qrDim - border * scale * 2);
+      if (lines.length > 3) lines = lines.slice(0, 3);
+      labelHeight = padTop + lines.length * lineHeight + padBottom;
+    }
+
+    canvas.width = qrDim;
+    canvas.height = labelHeight + qrDim;
+
+    // White background
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, dim, dim);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Label text (resizing the canvas reset the context, so set font again)
+    if (label) {
+      ctx.fillStyle = '#000000';
+      ctx.font = QR_FONT.replace('{SIZE}', fontSize);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      let y = padTop + lineHeight / 2;
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], canvas.width / 2, y);
+        y += lineHeight;
+      }
+    }
+
+    // QR modules, offset below the label area
     ctx.fillStyle = '#000000';
-    for (let y = 0; y < qr.size; y++) {
-      for (let x = 0; x < qr.size; x++) {
-        if (qr.getModule(x, y)) {
-          ctx.fillRect((x + border) * scale, (y + border) * scale, scale, scale);
+    for (let yy = 0; yy < qr.size; yy++) {
+      for (let xx = 0; xx < qr.size; xx++) {
+        if (qr.getModule(xx, yy)) {
+          ctx.fillRect((xx + border) * scale, labelHeight + (yy + border) * scale, scale, scale);
         }
       }
     }
+
     lastQrDataUrl = canvas.toDataURL('image/png');
   }
 
@@ -1779,6 +1894,10 @@ var qrcodegen;
 
   // ─── Keyboard ────────────────────────────────
   document.addEventListener('keydown', function(e) {
+    if (document.getElementById('labelModal').classList.contains('visible')) {
+      if (e.key === 'Enter') { e.preventDefault(); confirmExportQR(); return; }
+      if (e.key === 'Escape') { hideLabelModal(); return; }
+    }
     if (e.ctrlKey && e.key === 'Enter') execute();
     if (e.key === 'Escape') { hideConfirm(); if (cameraStream) closeCamera(); }
   });
